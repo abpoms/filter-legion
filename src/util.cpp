@@ -1,12 +1,13 @@
 #include "util.h"
 #include "libgcs.h"
+
+#include "realm/realm.h"
 #include <stdexcept>
 
 #include <fstream>
 #include <iostream>
 #include <sstream>
 
-using namespace VAE;
 using namespace LegionRuntime::HighLevel;
 using namespace LegionRuntime::Accessor;
 using namespace LegionRuntime::Arrays;
@@ -84,13 +85,6 @@ bool read_line(std::string &line, FILE *fp) {
   }
 }
 
-void delete_file(const std::string &file) {
-  std::ostringstream strm;
-  strm << "/bin/rm -f " << file;
-  system(strm.str().c_str());
-}
-
-
 bool get_raw_pointer(RegionAccessor<AccessorType::Generic, void> acc,
                      Rect<1> dom,
                      char **ptr,
@@ -103,12 +97,68 @@ bool get_raw_pointer(RegionAccessor<AccessorType::Generic, void> acc,
            !offsets_are_dense<1>(dom,elem_stride, size));
 }
 
+char* get_array_pointer(UntypedAccessor accessor,
+                        size_t extent,
+                        size_t element_size) {
+  Rect<1> array_rect(Point<1>(0), Point<1>(extent - 1));
+  char* array_ptr = nullptr;
+  bool success =
+    get_raw_pointer(accessor, array_rect, &array_ptr, element_size);
+  // we should always have a direct pointer to the data
+  if (!success) assert(false);
+  return array_ptr;
+}
+
 char* get_image_pointer(ImageAccessor accessor,
                         int width, int height, int channels) {
-  rect<1> img_rect(point<1>(0), point<1>(width * height * channels - 1));
-  char* image_ptr = nullptr;
-  bool success = get_raw_pointer(accessor, img_rect, &image_ptr, sizeof(char));
-  // we should always have a direct pointer to the image
-  if (!success) assert(false);
-  return image_ptr;
+  return get_array_pointer(accessor, width * height * channels, sizeof(char));
+}
+
+IndexPartition create_even_partition(HighLevelRuntime* rt,
+                                     Context ctx,
+                                     IndexSpace is,
+                                     Domain color_dom) {
+  Domain index_domain = rt->get_index_space_domain(ctx, is);
+  const size_t index_volume = index_domain.get_volume();
+
+  const size_t color_volume = color_dom.get_volume();
+
+  if (index_domain.get_dim() == 0) {
+    PointColoring coloring;
+    size_t elements_allocated = 0;
+    IndexIterator is_itr(rt, ctx, is);
+
+    size_t i = 0;
+    for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
+      DomainPoint color = itr.p;
+
+      size_t elements =
+        ceil(static_cast<double>(index_volume - elements_allocated) /
+             (color_volume - i));
+      for (size_t i = 0; i < elements; ++i) {
+        coloring[color].points.insert(is_itr.next());
+      }
+      elements_allocated += elements;
+      i++;
+    }
+    return rt->create_index_partition(ctx, is, color_dom, coloring);
+  } else {
+    DomainPointColoring coloring;
+    size_t elements_allocated = 0;
+    size_t i = 0;
+    for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
+      DomainPoint color = itr.p;
+
+      size_t elements =
+        ceil(static_cast<double>(index_volume - elements_allocated) /
+             (color_volume - i));
+      coloring[color] =
+        Domain::from_rect<1>
+        (Rect<1>(Point<1>(elements_allocated),
+                 Point<1>(elements_allocated + elements - 1)));
+      elements_allocated += elements;
+      i++;
+    }
+    return rt->create_index_partition(ctx, is, color_dom, coloring);
+  }
 }

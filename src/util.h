@@ -6,6 +6,10 @@
 
 #include "legion.h"
 
+using UntypedAccessor =
+  LegionRuntime::Accessor::RegionAccessor
+  <LegionRuntime::Accessor::AccessorType::Generic, void>;
+
 using StringAccessor =
   LegionRuntime::Accessor::RegionAccessor
   <LegionRuntime::Accessor::AccessorType::Generic, void>;
@@ -24,8 +28,6 @@ FILE* write_gcs_file(std::string key, std::string bucket, std::string path);
 void close_gcs_write_file(FILE* fp, std::string path);
 
 bool read_line(std::string &line, FILE *fp);
-
-void delete_file(const std::string &file);
 
 template<unsigned DIM>
 static inline bool offsets_are_dense
@@ -48,15 +50,14 @@ static inline bool offsets_are_dense
   return true;
 }
 
-bool get_raw_pointer(LegionRuntime::Accessor::RegionAccessor
-                     <LegionRuntime::Accessor::AccessorType::Generic, void> acc,
+bool get_raw_pointer(UntypedAccessor acc,
                      LegionRuntime::Arrays::Rect<1> dom,
                      char **ptr,
                      size_t size);
 
 template <int LENGTH>
 std::string read_string(StringAccessor accessor,
-                        LegionRuntime::DomainPoint point) {
+                        LegionRuntime::HighLevel::DomainPoint point) {
   char buffer[LENGTH];
   accessor.read_untyped(point, buffer, LENGTH);
   // Performing this copy because string buffer isn't guaranteed to be
@@ -66,12 +67,22 @@ std::string read_string(StringAccessor accessor,
 
 template <int LENGTH>
 void write_string(StringAccessor accessor,
-                  LegionRuntime::DomainPoint point,
+                  LegionRuntime::HighLevel::DomainPoint point,
                   const std::string& string) {
   accessor.write_untyped(point, string.c_str(), string.size() + 1);
 }
 
+char* get_array_pointer(UntypedAccessor accessor,
+                        size_t extent,
+                        size_t element_size);
+
 char* get_image_pointer(ImageAccessor accessor,
                         int width, int height, int channels);
+
+LegionRuntime::HighLevel::IndexPartition create_even_partition
+(LegionRuntime::HighLevel::HighLevelRuntime* rt,
+ LegionRuntime::HighLevel::Context ctx,
+ LegionRuntime::HighLevel::IndexSpace is,
+ LegionRuntime::HighLevel::Domain color_domain);
 
 #endif // UTIL_H_
