@@ -136,7 +136,11 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
       for (size_t i = 0; i < elements; ++i) {
-        coloring[color].points.insert(is_itr.next());
+        if (is_itr.has_next()) {
+          coloring[color].points.insert(is_itr.next());
+        } else {
+          assert(false);
+        }
       }
       elements_allocated += elements;
       i++;
@@ -152,6 +156,65 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
       size_t elements =
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
+      coloring[color] =
+        Domain::from_rect<1>
+        (Rect<1>(Point<1>(elements_allocated),
+                 Point<1>(elements_allocated + elements - 1)));
+      elements_allocated += elements;
+      i++;
+    }
+    return rt->create_index_partition(ctx, is, color_dom, coloring);
+  }
+}
+
+IndexPartition create_batched_partition(HighLevelRuntime* rt,
+                                        Context ctx,
+                                        IndexSpace is,
+                                        int batch_size,
+                                        Domain& color_dom) {
+  Domain index_domain = rt->get_index_space_domain(ctx, is);
+  const size_t index_volume = index_domain.get_volume();
+
+  const size_t color_volume = index_volume / batch_size;
+  Rect<1> color_rect = Rect<1>(Point<1>(0), Point<1>(color_volume - 1));
+  color_dom = Domain::from_rect<1>(color_rect);
+
+  if (index_domain.get_dim() == 0) {
+    PointColoring coloring;
+    size_t elements_allocated = 0;
+    IndexIterator is_itr(rt, ctx, is);
+    size_t i = 0;
+
+    for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
+      DomainPoint color = itr.p;
+
+      size_t elements = batch_size;
+      if (elements_allocated + elements > index_volume)
+        elements = index_volume - elements_allocated;
+
+      for (size_t i = 0; i < elements; ++i) {
+        if (is_itr.has_next()) {
+          coloring[color].points.insert(is_itr.next());
+        } else {
+          assert(false);
+        }
+      }
+
+      elements_allocated += elements;
+      i++;
+    }
+    return rt->create_index_partition(ctx, is, color_dom, coloring);
+  } else {
+    DomainPointColoring coloring;
+    size_t elements_allocated = 0;
+    size_t i = 0;
+    for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
+      DomainPoint color = itr.p;
+
+      size_t elements = batch_size;
+      if (elements_allocated + elements > index_volume)
+        elements = index_volume - elements_allocated;
+
       coloring[color] =
         Domain::from_rect<1>
         (Rect<1>(Point<1>(elements_allocated),

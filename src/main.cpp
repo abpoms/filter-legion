@@ -1,8 +1,11 @@
+#include "common.h"
+#include "compute_features.h"
 #include "util.h"
 #include "jpeg/JPEGReader.h"
 
 #include "legion.h"
 #include "default_mapper.h"
+#include "realm/realm.h"
 
 #include <fstream>
 
@@ -38,7 +41,6 @@ enum VectorIDs {
 };
 
 const size_t PATH_SIZE = 256;
-const size_t VEC_DIM = 4096;
 
 const int IMAGE_WIDTH = 400;
 const int IMAGE_HEIGHT = 225;
@@ -58,10 +60,16 @@ public:
     auto id = task->task_id;
     if (id == MAIN_TASK_ID) {
     } else if (id == INNER_TASK_ID) {
-      task->regions[0].virtual_map = true;
-      task->regions[1].virtual_map = true;
+      //task->regions[0].virtual_map = true;
+      //task->regions[1].virtual_map = true;
+      task->regions[2].virtual_map = true;
+      task->task_priority = 4;
     } else if (id == LOAD_TASK_ID) {
+      task->task_priority = 2;
     } else if (id == FILTER_TASK_ID) {
+      task->task_priority = 3;
+    } else if (id == FEATURE_TASK_ID) {
+      task->task_priority = 2;
     }
   }
 };
@@ -76,24 +84,24 @@ void feature_task(const Task* task,
   PhysicalRegion image_region = regions[0];
   PhysicalRegion vector_region = regions[1];
 
-  const char* image_ptr =
+  char* image_ptr =
     get_image_pointer(image_region.get_field_accessor(DATA_ID),
                       IMAGE_WIDTH,
                       IMAGE_HEIGHT,
                       IMAGE_CHANNELS);
+  Frame frame;
+  frame.width = IMAGE_WIDTH;
+  frame.height = IMAGE_HEIGHT;
+  frame.channels = IMAGE_CHANNELS;
+  frame.element_size = sizeof(char);
+  frame.data = image_ptr;
 
-  float* vector_ptr =
-    reinterpret_cast<float*>
+  char* vector_ptr =
     (get_array_pointer(vector_region.get_field_accessor(VEC_ID),
                        1,
                        VEC_DIM * sizeof(float)));
 
-  // Fake compute
-  for (size_t i = 0; i < VEC_DIM; ++i) {
-    for (size_t j = 0; j < 10000; ++j) {
-      vector_ptr[i] += static_cast<float>(image_ptr[i]);
-    }
-  }
+  map_pool5_features(&frame, vector_ptr);
 }
 
 bool filter_task(const Task* task,
@@ -119,7 +127,7 @@ bool filter_task(const Task* task,
     return true;
   } else {
     filter_acc.write(itr.next(), -1);
-    return false;
+    return true;
   }
 }
 
@@ -171,8 +179,27 @@ void inner_task(const Task* task,
                 Context ctx,
                 HighLevelRuntime* rt) {
   LogicalRegion path_logical_region = task->regions[0].region;
-  LogicalRegion vector_logical_region = task->regions[1].region;
+  LogicalRegion vector_filter_logical_region = task->regions[1].region;
+  LogicalRegion vector_data_logical_region = task->regions[2].region;
   PhysicalRegion path_pr = regions[0];
+
+  IndexSpace vector_is = vector_filter_logical_region.get_index_space();
+
+  Domain color_domain =
+    Domain::from_rect<1>
+    (Rect<1>(Point<1>(0),
+             Point<1>(rt->get_index_space_domain(ctx, vector_is)
+                      .get_volume() - 1)));
+
+  IndexPartition vector_index_partition =
+    create_even_partition(rt, ctx, vector_is, color_domain);
+
+  LogicalPartition vector_filter_partition =
+    rt->get_logical_partition(ctx, vector_filter_logical_region,
+                              vector_index_partition);
+  LogicalPartition vector_data_partition =
+    rt->get_logical_partition(ctx, vector_data_logical_region,
+                              vector_index_partition);
 
   StringAccessor path_acc = path_pr.get_field_accessor(PATH_ID);
 
@@ -180,76 +207,86 @@ void inner_task(const Task* task,
     rt->get_index_space_domain(ctx, path_logical_region.get_index_space())
     .get_rect<1>();
 
-  //for (GenericPointInRectIterator<1> itr(path_rect); itr; itr++) {
-  GenericPointInRectIterator<1> itr(path_rect);
-  DomainPoint p = DomainPoint::from_point<1>(itr.p);
-  std::string path = read_string<PATH_SIZE>(path_acc, p);
+  Realm::Domain::DomainPointIterator vec_itr(color_domain);
+  for (GenericPointInRectIterator<1> itr(path_rect); itr; itr++, vec_itr++) {
+    DomainPoint p = DomainPoint::from_point<1>(itr.p);
+    std::string path = read_string<PATH_SIZE>(path_acc, p);
 
-  // We could create these at the top level once because we are working with
-  // images all of the same size but we might want to work with images of
-  // multiple sizes
-  Rect<1> image_rect(Point<1>(0), Point<1>(IMAGE_WIDTH *
-                                           IMAGE_HEIGHT *
-                                           IMAGE_CHANNELS));
-  IndexSpace image_is =
-    rt->create_index_space(ctx, Domain::from_rect<1>(image_rect));
+    // We could create these at the top level once because we are working with
+    // images all of the same size but we might want to work with images of
+    // multiple sizes
+    Rect<1> image_rect(Point<1>(0), Point<1>(IMAGE_WIDTH *
+                                             IMAGE_HEIGHT *
+                                             IMAGE_CHANNELS));
+    IndexSpace image_is =
+      rt->create_index_space(ctx, Domain::from_rect<1>(image_rect));
 
-  FieldSpace image_fs = rt->create_field_space(ctx);
-  {
-    FieldAllocator allocator = rt->create_field_allocator(ctx, image_fs);
-    allocator.allocate_field(sizeof(char), DATA_ID);
+    FieldSpace image_fs = rt->create_field_space(ctx);
+    {
+      FieldAllocator allocator = rt->create_field_allocator(ctx, image_fs);
+      allocator.allocate_field(sizeof(char), DATA_ID);
+    }
+
+    LogicalRegion image_region =
+      rt->create_logical_region(ctx, image_is, image_fs);
+
+    LogicalRegion vector_filter_subregion =
+      rt->get_logical_subregion_by_color(ctx, vector_filter_partition,
+                                         vec_itr.p);
+
+    LogicalRegion vector_data_subregion =
+      rt->get_logical_subregion_by_color(ctx, vector_data_partition,
+                                         vec_itr.p);
+
+    ///////////////////////////////////////////////////////////////////////////
+    /// Load image
+    TaskLauncher load_launcher(LOAD_TASK_ID,
+                               TaskArgument(path.data(), path.size()));
+    load_launcher.add_region_requirement
+      (RegionRequirement(image_region, WRITE_ONLY, EXCLUSIVE, image_region));
+    load_launcher.add_field(0, DATA_ID);
+
+    rt->execute_task(ctx, load_launcher);
+
+    ///////////////////////////////////////////////////////////////////////////
+    /// Check if image passes filter
+    TaskLauncher filter_launcher(FILTER_TASK_ID, TaskArgument());
+    filter_launcher.add_region_requirement
+      (RegionRequirement(image_region, READ_ONLY, EXCLUSIVE, image_region));
+    filter_launcher.add_field(0, DATA_ID);
+
+    filter_launcher.add_region_requirement
+      (RegionRequirement(vector_filter_subregion,
+                         WRITE_ONLY,
+                         EXCLUSIVE,
+                         vector_filter_logical_region));
+    filter_launcher.add_field(1, FILTER_ID);
+
+    Future f = rt->execute_task(ctx, filter_launcher);
+    Predicate filter_result = rt->create_predicate(ctx, f);
+
+    ///////////////////////////////////////////////////////////////////////////
+    /// Compute feature vector from image
+    TaskLauncher vector_launcher(FEATURE_TASK_ID, TaskArgument(),
+                                 filter_result);
+    vector_launcher.add_region_requirement
+      (RegionRequirement(image_region, READ_ONLY, EXCLUSIVE, image_region));
+    vector_launcher.add_field(0, DATA_ID);
+
+    vector_launcher.add_region_requirement
+      (RegionRequirement(vector_data_subregion,
+                         WRITE_ONLY,
+                         EXCLUSIVE,
+                         vector_data_logical_region));
+    vector_launcher.add_field(1, VEC_ID);
+
+    rt->execute_task(ctx, vector_launcher);
+
+    rt->destroy_logical_region(ctx, image_region);
+    rt->destroy_index_space(ctx, image_is);
+    rt->destroy_field_space(ctx, image_fs);
   }
-
-  LogicalRegion image_region =
-    rt->create_logical_region(ctx, image_is, image_fs);
-
-  ///////////////////////////////////////////////////////////////////////////
-  /// Load image
-  TaskLauncher load_launcher(LOAD_TASK_ID,
-                             TaskArgument(path.data(), path.size()));
-  load_launcher.add_region_requirement
-    (RegionRequirement(image_region, WRITE_ONLY, EXCLUSIVE, image_region));
-  load_launcher.add_field(0, DATA_ID);
-
-  rt->execute_task(ctx, load_launcher);
-
-  ///////////////////////////////////////////////////////////////////////////
-  /// Check if image passes filter
-  TaskLauncher filter_launcher(FILTER_TASK_ID, TaskArgument());
-  filter_launcher.add_region_requirement
-    (RegionRequirement(image_region, READ_ONLY, EXCLUSIVE, image_region));
-  filter_launcher.add_field(0, DATA_ID);
-
-  filter_launcher.add_region_requirement
-    (RegionRequirement(vector_logical_region,
-                       WRITE_ONLY,
-                       EXCLUSIVE,
-                       vector_logical_region));
-  filter_launcher.add_field(1, FILTER_ID);
-
-  Future f = rt->execute_task(ctx, filter_launcher);
-  Predicate filter_result = rt->create_predicate(ctx, f);
-
-  ///////////////////////////////////////////////////////////////////////////
-  /// Compute feature vector from image
-  TaskLauncher vector_launcher(FEATURE_TASK_ID, TaskArgument(),
-                               filter_result);
-  vector_launcher.add_region_requirement
-    (RegionRequirement(image_region, READ_ONLY, EXCLUSIVE, image_region));
-  vector_launcher.add_field(0, DATA_ID);
-
-  vector_launcher.add_region_requirement
-    (RegionRequirement(vector_logical_region,
-                       WRITE_ONLY,
-                       EXCLUSIVE,
-                       vector_logical_region));
-  vector_launcher.add_field(1, VEC_ID);
-
-  rt->execute_task(ctx, vector_launcher);
-
-  rt->destroy_logical_region(ctx, image_region);
-  rt->destroy_index_space(ctx, image_is);
-  rt->destroy_field_space(ctx, image_fs);
+  rt->destroy_index_partition(ctx, vector_index_partition);
 }
 
 void main_task(const Task* task,
@@ -329,7 +366,7 @@ void main_task(const Task* task,
   /////////////////////////////////////////////////////////////////////////////
   /// Partition path and vector region
   // Partition each image into its own color
-  Rect<1> color_rect(Point<1>(0), Point<1>(paths.size() - 1));
+  Rect<1> color_rect(Point<1>(0), Point<1>(199));
   Domain color_domain(Domain::from_rect<1>(color_rect));
 
   // Not implemented in non-shared low level runtime
@@ -361,8 +398,12 @@ void main_task(const Task* task,
   launcher.add_region_requirement
     (RegionRequirement(vector_partition, 0, WRITE_ONLY, EXCLUSIVE,
                        vector_region));
-  launcher.add_field(1, VEC_ID);
   launcher.add_field(1, FILTER_ID);
+
+  launcher.add_region_requirement
+    (RegionRequirement(vector_partition, 0, WRITE_ONLY, EXCLUSIVE,
+                       vector_region));
+  launcher.add_field(2, VEC_ID);
 
   FutureMap fm = rt->execute_index_space(ctx, launcher);
 
@@ -398,6 +439,8 @@ void mapper_registration(Machine m, HighLevelRuntime *rt,
 
 
 int main(int argc, char **argv) {
+  init_neural_net();
+
   HighLevelRuntime::set_top_level_task_id(MAIN_TASK_ID);
   HighLevelRuntime::register_legion_task<main_task>
     (MAIN_TASK_ID, Processor::LOC_PROC, true, false);
@@ -406,13 +449,13 @@ int main(int argc, char **argv) {
     (INNER_TASK_ID, Processor::LOC_PROC, false, true);
 
   HighLevelRuntime::register_legion_task<load_task>
-    (LOAD_TASK_ID, Processor::IO_PROC, true, false);
+    (LOAD_TASK_ID, Processor::IO_PROC, true, true);
 
   HighLevelRuntime::register_legion_task<bool, filter_task>
-    (FILTER_TASK_ID, Processor::LOC_PROC, true, false);
+    (FILTER_TASK_ID, Processor::LOC_PROC, true, true);
 
   HighLevelRuntime::register_legion_task<feature_task>
-    (FEATURE_TASK_ID, Processor::LOC_PROC, true, false);
+    (FEATURE_TASK_ID, Processor::LOC_PROC, true, true);
 
   HighLevelRuntime::set_registration_callback(mapper_registration);
 
