@@ -24,9 +24,8 @@ using boost::shared_ptr;
 using std::string;
 
 const int DIM = 227;
-shared_ptr<Net<float> > feature_extraction_net;
 
-void init_neural_net(Frame mean, int batch_size) {
+shared_ptr<Net<float>> init_neural_net(Frame mean, int batch_size) {
   std::string model_path =
     "features/hybridCNN/hybridCNN_deploy_upgraded.prototxt";
   std::string model_weights_path =
@@ -36,7 +35,7 @@ void init_neural_net(Frame mean, int batch_size) {
     "features/hybridCNN/hybridCNN_mean.binaryproto";
 
   // Initialize our network
-  feature_extraction_net =
+  shared_ptr<Net<float>> feature_extraction_net =
     shared_ptr<Net<float>>(new Net<float>(model_path, caffe::TEST));
   feature_extraction_net->CopyTrainedLayersFrom(model_weights_path);
   const shared_ptr<Blob<float>> data_blob =
@@ -57,49 +56,57 @@ void init_neural_net(Frame mean, int batch_size) {
   //   mean.data[i + (224 * 224) * 1] = 113.741088867f;
   //   mean.data[i + (224 * 224) * 2] = 116.060394287f;
   // }
+  return feature_extraction_net;
 }
-
-void destroy_neural_net() {
-  // Initialize our network
-  feature_extraction_net = nullptr;
-}
-
 
 void map_pool5_features(std::vector<Frame> frames, char* features_ptr) {
   Frame mean(256, 256, 3, sizeof(float));
-  int BATCH_SIZE = frames.size();
 
-  init_neural_net(mean, BATCH_SIZE);
+  int num_images = frames.size();
+
+  int BATCH_SIZE = 16;
+  shared_ptr<Net<float> > feature_extraction_net =
+    init_neural_net(mean, BATCH_SIZE);
 
   const shared_ptr<Blob<float>> data_blob =
     feature_extraction_net->blob_by_name("data");
 
+
   Blob<float> input{BATCH_SIZE, 3, DIM, DIM};
-  float *data = input.mutable_cpu_data();
 
-  // Pack image into blob
-  Frame conv_input(DIM, DIM, 3, sizeof(float));
-  for (int i = 0; i < BATCH_SIZE; ++i) {
-    Frame image_ptr = frames[i];
-    to_conv_input(&image_ptr, &conv_input, &mean);
-    memcpy(data + (DIM * DIM * 3 * sizeof(float) * i,
-           conv_input.data, DIM * DIM * 3 * sizeof(float));
+  for (int i = 0; i < num_images; i+=BATCH_SIZE) {
+    int current_batch = BATCH_SIZE;
+    if (current_batch + i > num_images) {
+      current_batch = num_images - i;
+      data_blob->Reshape({current_batch, 3, DIM, DIM});
+      input.Reshape({current_batch, 3, DIM, DIM});
+    }
+    float *data = input.mutable_cpu_data();
+
+    // Pack image into blob
+    Frame conv_input(DIM, DIM, 3, sizeof(float));
+    for (int j = 0; j < current_batch; ++j) {
+      Frame image_ptr = frames[i + j];
+      to_conv_input(&image_ptr, &conv_input, &mean);
+      memcpy(data + (DIM * DIM * 3) * j,
+             conv_input.data, DIM * DIM * 3 * sizeof(float));
+    }
+    delete[] conv_input.data;
+
+    // Evaluate network
+    feature_extraction_net->Forward({&input});
+
+    // Extract features from Blob
+    // TODO(abp): I can probably just allocate my own giant set of memory,
+    // use it as the output for the net, and then create a bunch of images
+    // backed by the features output into that memory
+    const shared_ptr<Blob<float>> features_data =
+      feature_extraction_net->blob_by_name("pool5");
+
+    memcpy(features_ptr + i * VEC_DIM,
+           features_data->cpu_data(),
+           sizeof(float) * VEC_DIM * BATCH_SIZE);
   }
-  delete[] conv_input.data;
-
-  // Evaluate network
-  feature_extraction_net->Forward({&input});
-
-  // Extract features from Blob
-  // TODO(abp): I can probably just allocate my own giant set of memory,
-  // use it as the output for the net, and then create a bunch of images
-  // backed by the features output into that memory
-  const shared_ptr<Blob<float>> features_data =
-    feature_extraction_net->blob_by_name("pool5");
-
-  memcpy(features_ptr, features_data->cpu_data(),
-         sizeof(float) * VEC_DIM * BATCH_SIZE);
 
   delete[] mean.data;
-  destroy_neural_net();
 }

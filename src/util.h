@@ -89,7 +89,7 @@ LegionRuntime::HighLevel::IndexPartition create_batched_partition
 (LegionRuntime::HighLevel::HighLevelRuntime* rt,
  LegionRuntime::HighLevel::Context ctx,
  LegionRuntime::HighLevel::IndexSpace is,
- size_t batch_size,
+ int batch_size,
  LegionRuntime::HighLevel::Domain& color_domain);
 
 #endif // UTIL_H_

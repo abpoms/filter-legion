@@ -175,7 +175,7 @@ IndexPartition create_batched_partition(HighLevelRuntime* rt,
   Domain index_domain = rt->get_index_space_domain(ctx, is);
   const size_t index_volume = index_domain.get_volume();
 
-  const size_t color_volume = index_volume / batch_size;
+  const size_t color_volume = ceil(index_volume / (double)batch_size);
   Rect<1> color_rect = Rect<1>(Point<1>(0), Point<1>(color_volume - 1));
   color_dom = Domain::from_rect<1>(color_rect);
 
