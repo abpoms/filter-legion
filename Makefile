@@ -46,7 +46,7 @@ INCLUDE_FLAGS += \
 
 # Compiler flags
 GCC_FLAGS   ?=
-GCC_FLAGS += -DCPU_ONLY
+GCC_FLAGS += -DCPU_ONLY -DUSE_MKL
 
 # Linker flags
 LD_FLAGS += \
@@ -54,7 +54,7 @@ LD_FLAGS += \
   -ljpeg \
   -lz \
   -L$(CAFFE_LIB_PATH) -lcaffe -L$(HDF5_LIB_PATH) -lhdf5 -lglog \
-  -fopenmp
+  -fopenmp -lboost_system
 
 HALIDE_GEN := $(HALIDE_SRC:%.cpp=src/halide/%_gen)
 HALIDE_OBJS := $(HALIDE_SRC:%.cpp=src/halide/%.o)
