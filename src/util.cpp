@@ -86,9 +86,23 @@ bool read_line(std::string &line, FILE *fp) {
 }
 
 bool get_raw_pointer(RegionAccessor<AccessorType::Generic, void> acc,
+                     ptr_t ptr,
+                     size_t req_count,
+                     size_t size,
+                     char **data) {
+  size_t act_count;
+  ByteOffset elem_stride;
+  *data =
+    reinterpret_cast<char*>(acc.raw_span_ptr(ptr, req_count, act_count,
+                                             elem_stride));
+  return !(!*data || (req_count != act_count) ||
+           ((size_t)elem_stride.offset != size));
+}
+
+bool get_raw_pointer(RegionAccessor<AccessorType::Generic, void> acc,
                      Rect<1> dom,
-                     char **ptr,
-                     size_t size) {
+                     size_t size,
+                     char **ptr) {
   Rect<1> subrect;
   ByteOffset elem_stride[1];
   *ptr =
@@ -98,12 +112,23 @@ bool get_raw_pointer(RegionAccessor<AccessorType::Generic, void> acc,
 }
 
 char* get_array_pointer(UntypedAccessor accessor,
+                        ptr_t ptr,
                         size_t extent,
                         size_t element_size) {
-  Rect<1> array_rect(Point<1>(0), Point<1>(extent - 1));
   char* array_ptr = nullptr;
   bool success =
-    get_raw_pointer(accessor, array_rect, &array_ptr, element_size);
+    get_raw_pointer(accessor, ptr, extent, element_size, &array_ptr);
+  // we should always have a direct pointer to the data
+  if (!success) assert(false);
+  return array_ptr;
+}
+
+char* get_array_pointer(UntypedAccessor accessor,
+                        LegionRuntime::Arrays::Rect<1> dom,
+                        size_t element_size) {
+  char* array_ptr = nullptr;
+  bool success =
+    get_raw_pointer(accessor, dom, element_size, &array_ptr);
   // we should always have a direct pointer to the data
   if (!success) assert(false);
   return array_ptr;
@@ -111,7 +136,8 @@ char* get_array_pointer(UntypedAccessor accessor,
 
 char* get_image_pointer(ImageAccessor accessor,
                         int width, int height, int channels) {
-  return get_array_pointer(accessor, width * height * channels, sizeof(char));
+  Rect<1> array_rect(Point<1>(0), Point<1>(width * height * channels - 1));
+  return get_array_pointer(accessor, array_rect, sizeof(char));
 }
 
 IndexPartition create_even_partition(HighLevelRuntime* rt,
@@ -135,8 +161,6 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
       size_t elements =
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
-      printf("color %d, elements %lu\n",
-             color[0], elements);
       for (size_t i = 0; i < elements; ++i) {
         if (is_itr.has_next()) {
           coloring[color].points.insert(is_itr.next());
@@ -154,15 +178,12 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
     size_t i = 0;
     Realm::Domain::DomainPointIterator is_itr(index_domain);
     int index_lower_bound = is_itr.p[0];
-    printf("lower %d\n", index_lower_bound);
     for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
       DomainPoint color = itr.p;
 
       size_t elements =
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
-      printf("color %d, elements %lu\n",
-             color[0], elements);
       coloring[color] =
         Domain::from_rect<1>
         (Rect<1>(Point<1>(index_lower_bound + elements_allocated),
@@ -231,4 +252,12 @@ IndexPartition create_batched_partition(HighLevelRuntime* rt,
     }
     return rt->create_index_partition(ctx, is, color_dom, coloring);
   }
+}
+
+double vec_sum(float* data, int size) {
+  double sum = 0.0f;
+  for (int i = 0; i < size; i += 1024) {
+    sum += data[i];
+  }
+  return sum;
 }

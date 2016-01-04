@@ -92,10 +92,15 @@ void knn_task(const Task* task,
   RegionAccessor<AccessorType::Generic, void> vector_acc
     = vector_region.get_field_accessor(VEC_ID);
 
+  size_t extent =
+    rt->get_index_space_domain(ctx,
+                               vector_region.get_logical_region()
+                               .get_index_space()).get_volume();
+  IndexIterator itr(rt, ctx, vector_region.get_logical_region());
   char* filter_ptr =
-    get_array_pointer(vector_acc, 1, VEC_DIM * sizeof(float));
+    get_array_pointer(vector_acc, itr.next(), extent, VEC_DIM * sizeof(float));
 
-  printf("hi %e\n", *((float*)filter_ptr + sizeof(float) * 5));
+  printf("hi %e\n", vec_sum((float*)filter_ptr, VEC_DIM));
   fflush(stdout);
 }
 
@@ -111,13 +116,18 @@ void compact_task(const Task* task,
   RegionAccessor<AccessorType::Generic, void> dense_vector_acc
     = dense_vector_region.get_field_accessor(VEC_ID);
 
-  IndexIterator dense_itr(rt, ctx,
-                          dense_vector_region.get_logical_region());
-
+  size_t extent =
+    rt->get_index_space_domain(ctx,
+                               filtered_vector_region.get_logical_region()
+                               .get_index_space()).get_volume();
+  IndexIterator itr(rt, ctx, filtered_vector_region.get_logical_region());
   char* filter_ptr =
-    get_array_pointer(filtered_vector_acc, 1, VEC_DIM * sizeof(float));
-  printf("filter data %e\n", *((float*)filter_ptr + sizeof(float) * 1024));
+    get_array_pointer(filtered_vector_acc,
+                      itr.next(),
+                      extent,
+                      VEC_DIM * sizeof(float));
 
+  IndexIterator dense_itr(rt, ctx, dense_vector_region.get_logical_region());
   dense_vector_acc.write_untyped(dense_itr.next(),
                                  filter_ptr, VEC_DIM * sizeof(float));
 }
@@ -135,11 +145,7 @@ repartition_task(const Task* task,
   RegionAccessor<AccessorType::Generic> filter_acc =
     filter_result_region.get_field_accessor(FILTER_ID);
 
-  printf("before create ind\n");
-  fflush(stdout);
   IndexPartition p = rt->create_index_partition(ctx, filter_is, filter_acc);
-  printf("after create\n");
-  fflush(stdout);
   return p;
 }
 
@@ -172,16 +178,19 @@ void feature_task(const Task* task,
     frames.push_back(frame);
   }
 
+  //
+  RegionAccessor<AccessorType::Generic, void> vector_acc
+    = vector_region.get_field_accessor(VEC_ID);
+  size_t extent =
+    rt->get_index_space_domain(ctx,
+                               vector_region.get_logical_region()
+                               .get_index_space()).get_volume();
+  IndexIterator itr(rt, ctx, vector_region.get_logical_region());
   char* vector_ptr =
-    (get_array_pointer(vector_region.get_field_accessor(VEC_ID),
-                       args->batch_size,
-                       VEC_DIM * sizeof(float)));
+    get_array_pointer(vector_acc, itr.next(), extent, VEC_DIM * sizeof(float));
+  //
 
   map_pool5_features(frames, vector_ptr);
-  for (int i = 0; i < args->batch_size; ++i) {
-    printf("vector data %e\n", *(((float*)vector_ptr) + VEC_DIM * i
-                                 + sizeof(float) * 1024));
-  }
 }
 
 bool filter_task(const Task* task,
@@ -196,9 +205,6 @@ bool filter_task(const Task* task,
                                       IMAGE_WIDTH,
                                       IMAGE_HEIGHT,
                                       IMAGE_CHANNELS);
-  printf("filter result %d, %d\n",
-         *image_ptr, *image_ptr %2 == 0);
-
   RegionAccessor<AccessorType::Generic, int> filter_acc =
     vector_region.get_field_accessor(FILTER_ID).typeify<int>();
 
@@ -227,7 +233,6 @@ void load_task(const Task* task,
   StringAccessor path_acc = path_region.get_field_accessor(PATH_ID);
   std::string path =
     read_string<PATH_SIZE>(path_acc, itr.p);
-  printf("path load %s\n", path.c_str());
 
   FILE* fp = read_gcs_file(gcs_key, gcs_bucket, path);
 
@@ -578,8 +583,6 @@ void main_task(const Task* task,
     allocator.alloc(filtered_size);
   }
   size_t knn_size = rt->get_index_space_domain(ctx, knn_is).get_volume();
-  printf("knn size: %lu\n", knn_size);
-  fflush(stdout);
 
   FieldSpace knn_fs = rt->create_field_space(ctx);
   {

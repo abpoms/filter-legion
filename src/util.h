@@ -51,9 +51,15 @@ static inline bool offsets_are_dense
 }
 
 bool get_raw_pointer(UntypedAccessor acc,
+                     ptr_t ptr,
+                     size_t req_count,
+                     size_t size,
+                     char **data);
+
+bool get_raw_pointer(UntypedAccessor acc,
                      LegionRuntime::Arrays::Rect<1> dom,
-                     char **ptr,
-                     size_t size);
+                     size_t size,
+                     char **ptr);
 
 template <int LENGTH>
 std::string read_string(StringAccessor accessor,
@@ -73,7 +79,12 @@ void write_string(StringAccessor accessor,
 }
 
 char* get_array_pointer(UntypedAccessor accessor,
+                        ptr_t ptr,
                         size_t extent,
+                        size_t element_size);
+
+char* get_array_pointer(UntypedAccessor accessor,
+                        LegionRuntime::Arrays::Rect<1> dom,
                         size_t element_size);
 
 char* get_image_pointer(ImageAccessor accessor,
@@ -91,5 +102,7 @@ LegionRuntime::HighLevel::IndexPartition create_batched_partition
  LegionRuntime::HighLevel::IndexSpace is,
  int batch_size,
  LegionRuntime::HighLevel::Domain& color_domain);
+
+double vec_sum(float* data, int size);
 
 #endif // UTIL_H_
