@@ -135,6 +135,8 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
       size_t elements =
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
+      printf("color %d, elements %lu\n",
+             color[0], elements);
       for (size_t i = 0; i < elements; ++i) {
         if (is_itr.has_next()) {
           coloring[color].points.insert(is_itr.next());
@@ -150,16 +152,21 @@ IndexPartition create_even_partition(HighLevelRuntime* rt,
     DomainPointColoring coloring;
     size_t elements_allocated = 0;
     size_t i = 0;
+    Realm::Domain::DomainPointIterator is_itr(index_domain);
+    int index_lower_bound = is_itr.p[0];
+    printf("lower %d\n", index_lower_bound);
     for (Realm::Domain::DomainPointIterator itr(color_dom); itr; itr++) {
       DomainPoint color = itr.p;
 
       size_t elements =
         ceil(static_cast<double>(index_volume - elements_allocated) /
              (color_volume - i));
+      printf("color %d, elements %lu\n",
+             color[0], elements);
       coloring[color] =
         Domain::from_rect<1>
-        (Rect<1>(Point<1>(elements_allocated),
-                 Point<1>(elements_allocated + elements - 1)));
+        (Rect<1>(Point<1>(index_lower_bound + elements_allocated),
+                 Point<1>(index_lower_bound + elements_allocated + elements - 1)));
       elements_allocated += elements;
       i++;
     }

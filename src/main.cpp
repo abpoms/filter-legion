@@ -26,6 +26,7 @@ enum TaskID {
   FILTER_TASK_ID,
   FEATURE_TASK_ID,
   REPARTITION_TASK_ID,
+  COMPACT_TASK_ID,
   KNN_TASK_ID,
 };
 
@@ -63,7 +64,7 @@ public:
     auto id = task->task_id;
     if (id == MAIN_TASK_ID) {
     } else if (id == INNER_TASK_ID) {
-      task->regions[0].virtual_map = true;
+      //task->regions[0].virtual_map = true;
       //task->regions[1].virtual_map = true;
       task->regions[2].virtual_map = true;
       task->task_priority = 4;
@@ -85,8 +86,40 @@ void knn_task(const Task* task,
               const std::vector<PhysicalRegion>& regions,
               Context ctx,
               HighLevelRuntime* rt) {
-  printf("hi\n");
+  PhysicalRegion vector_region = regions[0];
+  PhysicalRegion knn_region = regions[1];
+
+  RegionAccessor<AccessorType::Generic, void> vector_acc
+    = vector_region.get_field_accessor(VEC_ID);
+
+  char* filter_ptr =
+    get_array_pointer(vector_acc, 1, VEC_DIM * sizeof(float));
+
+  printf("hi %e\n", *((float*)filter_ptr + sizeof(float) * 5));
   fflush(stdout);
+}
+
+void compact_task(const Task* task,
+                  const std::vector<PhysicalRegion>& regions,
+                  Context ctx,
+                  HighLevelRuntime* rt) {
+  PhysicalRegion filtered_vector_region = regions[0];
+  PhysicalRegion dense_vector_region = regions[1];
+
+  RegionAccessor<AccessorType::Generic, void> filtered_vector_acc
+    = filtered_vector_region.get_field_accessor(VEC_ID);
+  RegionAccessor<AccessorType::Generic, void> dense_vector_acc
+    = dense_vector_region.get_field_accessor(VEC_ID);
+
+  IndexIterator dense_itr(rt, ctx,
+                          dense_vector_region.get_logical_region());
+
+  char* filter_ptr =
+    get_array_pointer(filtered_vector_acc, 1, VEC_DIM * sizeof(float));
+  printf("filter data %e\n", *((float*)filter_ptr + sizeof(float) * 1024));
+
+  dense_vector_acc.write_untyped(dense_itr.next(),
+                                 filter_ptr, VEC_DIM * sizeof(float));
 }
 
 IndexPartition
@@ -141,10 +174,14 @@ void feature_task(const Task* task,
 
   char* vector_ptr =
     (get_array_pointer(vector_region.get_field_accessor(VEC_ID),
-                       1,
+                       args->batch_size,
                        VEC_DIM * sizeof(float)));
 
   map_pool5_features(frames, vector_ptr);
+  for (int i = 0; i < args->batch_size; ++i) {
+    printf("vector data %e\n", *(((float*)vector_ptr) + VEC_DIM * i
+                                 + sizeof(float) * 1024));
+  }
 }
 
 bool filter_task(const Task* task,
@@ -159,6 +196,8 @@ bool filter_task(const Task* task,
                                       IMAGE_WIDTH,
                                       IMAGE_HEIGHT,
                                       IMAGE_CHANNELS);
+  printf("filter result %d, %d\n",
+         *image_ptr, *image_ptr %2 == 0);
 
   RegionAccessor<AccessorType::Generic, int> filter_acc =
     vector_region.get_field_accessor(FILTER_ID).typeify<int>();
@@ -188,8 +227,7 @@ void load_task(const Task* task,
   StringAccessor path_acc = path_region.get_field_accessor(PATH_ID);
   std::string path =
     read_string<PATH_SIZE>(path_acc, itr.p);
-  printf("%s\n", path.c_str());
-  fflush(stdout);
+  printf("path load %s\n", path.c_str());
 
   FILE* fp = read_gcs_file(gcs_key, gcs_bucket, path);
 
@@ -250,8 +288,10 @@ void inner_task(const Task* task,
     (Rect<1>(Point<1>(0),
              Point<1>(rt->get_index_space_domain(ctx, vector_is)
                       .get_volume() - 1)));
+  printf("path partition\n");
   IndexPartition path_even_partition =
     create_even_partition(rt, ctx, path_is, path_even_domain);
+  printf("vector partition\n");
   IndexPartition vector_even_partition =
     create_even_partition(rt, ctx, vector_is, vector_even_domain);
 
@@ -275,6 +315,7 @@ void inner_task(const Task* task,
                               vector_batched_partition);
 
 
+  Realm::Domain::DomainPointIterator path_itr(path_even_domain);
   Realm::Domain::DomainPointIterator even_itr(vector_even_domain);
   for (Realm::Domain::DomainPointIterator batched_itr(batched_domain);
        batched_itr;
@@ -283,7 +324,7 @@ void inner_task(const Task* task,
     std::vector<LogicalRegion> images;
     for (current_batch_size = 0; current_batch_size < BATCH_SIZE;
          current_batch_size++) {
-      if (!even_itr) break;
+      if (!even_itr || !path_itr) break;
 
       // We could create these at the top level once because we are working with
       // images all of the same size but we might want to work with images of
@@ -308,7 +349,7 @@ void inner_task(const Task* task,
       /// Load image
       LogicalRegion path_filter_subregion =
         rt->get_logical_subregion_by_color(ctx, path_even_filter_partition,
-                                           even_itr.p);
+                                           path_itr.p);
 
       TaskLauncher load_launcher(LOAD_TASK_ID, TaskArgument());
       load_launcher.add_region_requirement
@@ -345,6 +386,7 @@ void inner_task(const Task* task,
       //Predicate filter_result = rt->create_predicate(ctx, f);
 
       even_itr++;
+      path_itr++;
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -400,6 +442,7 @@ void main_task(const Task* task,
     while (image_paths_stream.good()) {
       std::string path;
       std::getline(image_paths_stream, path);
+      printf("path %s\n", path.c_str());
       // -1 for null character
       if (path.size() > PATH_SIZE - 1) {
         std::cerr << "Path longer than maximum path size("
@@ -518,11 +561,11 @@ void main_task(const Task* task,
 
   IndexPartition filtered_partition = f.get_result<IndexPartition>();
 
-  LogicalPartition vector_filtered_lp =
+  LogicalPartition filtered_vector_lp =
     rt->get_logical_partition(ctx, vector_region, filtered_partition);
 
   /////////////////////////////////////////////////////////////////////////////
-  /// Create knn region based on filtered size
+  /// Create dense vector and knn region based on filtered size
   IndexSpace filtered_is = rt->get_index_subspace(ctx, filtered_partition, 0);
   size_t filtered_size =
     rt->get_index_space_domain(ctx, filtered_is).get_volume();
@@ -534,6 +577,9 @@ void main_task(const Task* task,
     IndexAllocator allocator = rt->create_index_allocator(ctx, knn_is);
     allocator.alloc(filtered_size);
   }
+  size_t knn_size = rt->get_index_space_domain(ctx, knn_is).get_volume();
+  printf("knn size: %lu\n", knn_size);
+  fflush(stdout);
 
   FieldSpace knn_fs = rt->create_field_space(ctx);
   {
@@ -543,15 +589,73 @@ void main_task(const Task* task,
 
   LogicalRegion knn_region = rt->create_logical_region(ctx, knn_is, knn_fs);
 
+  FieldSpace dense_vector_fs = rt->create_field_space(ctx);
+  {
+    FieldAllocator allocator = rt->create_field_allocator(ctx, dense_vector_fs);
+    allocator.allocate_field(VEC_DIM * sizeof(float), VEC_ID);
+  }
+
+  LogicalRegion dense_vector_region =
+    rt->create_logical_region(ctx, knn_is, dense_vector_fs);
+
+  /////////////////////////////////////////////////////////////////////////////
+  /// Partition vector regions for index space compact task
+  Domain filter_even_domain =
+    Domain::from_rect<1>
+    (Rect<1>(Point<1>(0),
+             Point<1>(rt->get_index_space_domain(ctx, filtered_is)
+                      .get_volume() - 1)));
+  IndexPartition filtered_vector_index_partition =
+    create_even_partition(rt, ctx, filtered_is, filter_even_domain);
+  IndexPartition dense_vector_index_partition =
+    create_even_partition(rt, ctx, knn_is, filter_even_domain);
+
+  /////////////////////////////////////////////////////////////////////////////
+  /// Perform copy from sparse to dense vector region
+  LogicalRegion filtered_vector_subregion =
+    rt->get_logical_subregion_by_color(ctx, filtered_vector_lp, 0);
+  LogicalPartition filtered_vector_subregion_partition =
+    rt->get_logical_partition(ctx, filtered_vector_subregion,
+                              filtered_vector_index_partition);
+
+  LogicalPartition dense_vector_partition =
+    rt->get_logical_partition(ctx, dense_vector_region,
+                              dense_vector_index_partition);
+
+  // CopyLauncher vector_copy_launcher;
+  // vector_copy_launcher.add_copy_requirements
+  //   (RegionRequirement(vector_filtered_subregion, READ_ONLY, EXCLUSIVE,
+  //                      vector_region),
+  //    RegionRequirement(dense_vector_region, WRITE_ONLY, EXCLUSIVE,
+  //                      dense_vector_region));
+  // vector_copy_launcher.add_src_field(0, VEC_ID);
+  // vector_copy_launcher.add_dst_field(0, VEC_ID);
+
+  // rt->issue_copy_operation(ctx, vector_copy_launcher);
+  IndexLauncher compact_launcher(COMPACT_TASK_ID, filter_even_domain,
+                                 TaskArgument(), argmap);
+
+  compact_launcher.add_region_requirement
+    (RegionRequirement(filtered_vector_subregion_partition, 0, READ_ONLY,
+                       EXCLUSIVE,
+                       vector_region));
+  compact_launcher.add_field(0, VEC_ID);
+
+  compact_launcher.add_region_requirement
+    (RegionRequirement(dense_vector_partition, 0, WRITE_ONLY, EXCLUSIVE,
+                       dense_vector_region));
+  compact_launcher.add_field(1, VEC_ID);
+
+  rt->execute_index_space(ctx, compact_launcher);
+
   /////////////////////////////////////////////////////////////////////////////
   /// Run KNN
-  LogicalRegion vector_subregion =
-    rt->get_logical_subregion_by_color(ctx, vector_filtered_lp, 0);
 
   TaskLauncher knn_launcher(KNN_TASK_ID, TaskArgument());
 
   knn_launcher.add_region_requirement
-    (RegionRequirement(vector_subregion, READ_ONLY, EXCLUSIVE, vector_region));
+    (RegionRequirement(dense_vector_region, READ_ONLY, EXCLUSIVE,
+                       dense_vector_region));
   knn_launcher.add_field(0, VEC_ID);
 
   knn_launcher.add_region_requirement
@@ -574,6 +678,7 @@ void main_task(const Task* task,
   rt->destroy_field_space(ctx, fs);
   rt->destroy_field_space(ctx, vector_fs);
   rt->destroy_field_space(ctx, knn_fs);
+  rt->destroy_field_space(ctx, dense_vector_fs);
 }
 
 //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -620,6 +725,11 @@ int main(int argc, char **argv) {
     (REPARTITION_TASK_ID, Processor::LOC_PROC, true, true,
      AUTO_GENERATE_ID, TaskConfigOptions(),
      "repartition task");
+
+  HighLevelRuntime::register_legion_task<compact_task>
+    (COMPACT_TASK_ID, Processor::LOC_PROC, true, true,
+     AUTO_GENERATE_ID, TaskConfigOptions(),
+     "compact task");
 
   HighLevelRuntime::register_legion_task<knn_task>
     (KNN_TASK_ID, Processor::LOC_PROC, true, true,
